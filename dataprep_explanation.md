@@ -364,7 +364,178 @@ mo_embeddings_padded = hf_utils.embed_mos_on_atoms(
 - **データ型**: `float32`でメモリ使用量を削減
 - **キャッシュ**: 変換済みデータの再利用
 
-### 7. 化学的意味
+### 7. `embed_mos_on_atoms`関数の詳細解析
+
+#### 関数の目的
+`embed_mos_on_atoms`関数は、分子軌道係数を各原子に埋め込み、E3NN（Equivariant Neural Networks）で使用可能な形式に変換する重要な関数です。
+
+#### 入力パラメータ
+```python
+def embed_mos_on_atoms(
+    mo_coeff,                           # 分子軌道係数 (n_basis, n_mo)
+    max_n_per_l,                        # 各軌道角運動量の最大数 {0: 6, 1: 3, 2: 1, 3: 0}
+    irrep_string_per_atom,              # 各原子の既約表現文字列
+    atom_type_embedding_per_atom,       # 各原子の原子種インデックス
+    mo_energies=None,                   # 分子軌道エネルギー（オプション）
+    dtype=torch.float32,                # データ型
+):
+```
+
+#### 処理ステップの詳細
+
+##### ステップ1: d軌道の修正
+```python
+# d軌道の順序を修正（PySCFの標準順序からE3NNの期待順序へ）
+fix_D = fix_d_orbitals(
+    atom_type_embedding_per_atom, irrep_string_per_atom, nbas=mo_coeff.shape[0]
+).to(dtype)
+mo_coeff = fix_D.T @ mo_coeff
+```
+
+**d軌道の順序問題**:
+- PySCF: `[d_xx, d_yy, d_zz, d_xy, d_xz, d_yz]`
+- E3NN: `[d_xy, d_xz, d_yz, d_xx-yy, d_zz]` (球面調和関数順序)
+
+##### ステップ2: 転置処理
+```python
+mo_coeff = mo_coeff.T  # (n_basis, n_mo) → (n_mo, n_basis)
+```
+
+##### ステップ3: 各原子の軌道処理
+```python
+for atom_idx, atom_irrep in irrep_string_per_atom.items():
+    # 原子の既約表現を解析
+    mo_irreps = e3nn.o3.Irreps(atom_irrep)
+    
+    # 各軌道角運動量の数をカウント
+    l_counts = np.array([mo_irreps.ls.count(l) for l in range(len(target_ls))])
+    
+    # 不足分を計算
+    l_diff = target_ls - l_counts
+```
+
+**例**: 炭素原子（def2-svp基底）
+- `atom_irrep = "1x0e+3x1o+1x2e"` (1つのs軌道、3つのp軌道、1つのd軌道)
+- `l_counts = [1, 3, 1, 0]` (s, p, d, f軌道の数)
+- `target_ls = [6, 3, 1, 0]` (最大軌道数)
+- `l_diff = [5, 0, 0, 0]` (s軌道を5つ追加でパディング)
+
+##### ステップ4: パディング軌道の生成
+```python
+# 不足分の軌道を生成
+diff_irreps = e3nn.o3.Irreps(
+    ("".join([f"{m}x{l}{int_to_p[(-1) ** l]}+" for l, m in enumerate(l_diff)]))[:-1]
+).simplify()
+
+# 元の軌道とパディング軌道を結合
+mo_irreps_padded = mo_irreps + diff_irreps
+```
+
+**パディング例**:
+- 炭素原子: `"1x0e+3x1o+1x2e" + "5x0e" = "6x0e+3x1o+1x2e"`
+
+##### ステップ5: 軌道係数の抽出とパディング
+```python
+# 該当原子の軌道係数を抽出
+atom_coefs = mo_coeff[:, slice_start : slice_start + mo_irreps.dim]
+
+# ゼロパディング
+atom_coeffs_paddded = torch.nn.functional.pad(
+    torch.tensor(atom_coefs), (0, diff_irreps.dim), value=0
+)
+```
+
+##### ステップ6: 原子種のone-hotエンコーディング
+```python
+atom_type_one_hot = torch.repeat_interleave(
+    torch.nn.functional.one_hot(
+        torch.tensor(atom_type_embedding_per_atom[atom_idx]),
+        num_classes=max_atoms,
+    )[None],
+    atom_coefs.shape[0],
+    dim=0,
+)
+```
+
+**例**: 炭素原子（インデックス5）
+- `atom_type_one_hot = [0, 0, 0, 0, 0, 1, 0, 0, ...]` (9次元、5番目が1)
+
+##### ステップ7: 特徴ベクトルの結合
+```python
+# 原子種情報と軌道係数を結合
+atom_coeffs_paddded_with_atom_idx = torch.cat(
+    [atom_type_one_hot, atom_coeffs_paddded], dim=-1
+)
+```
+
+#### 出力データ構造
+
+##### 基本出力
+```python
+return (
+    mo_embeddings_padded,                    # (n_mo, n_atom, n_features)
+    mo_irreps_padded_sorted,                 # 既約表現情報
+    mo_embeddings_padded_with_atom_idx,      # 原子種情報付き
+    mo_irreps_padded_sorted_with_atom_idx,   # 原子種情報付き既約表現
+)
+```
+
+##### データ形状の例
+```python
+# 入力: mo_coeff (n_basis=47, n_mo=23) for C2H4 molecule
+# 出力: mo_embeddings_padded (n_mo=23, n_atom=6, n_features=15)
+
+# 各原子の特徴ベクトル構成:
+# - 原子種one-hot: 9次元 (H, S, Li, Be, B, C, N, O, F)
+# - 軌道係数: 6次元 (パディング済みs軌道)
+# 合計: 15次元
+```
+
+#### `max_n_per_l`パラメータの決定
+
+##### 基底関数セット別の設定
+```python
+def get_max_n_per_l_for_basis(basis_set_name="def2-svp", up_to_element="S"):
+    # 各元素の基底関数を調べて最大軌道数を決定
+    max_n_per_l = {}
+    for element in elements:
+        basis = gto.load(basis_set_name, element)
+        for shell in basis:
+            l = shell[0]  # 軌道角運動量量子数
+            n_per_l[l] = n_per_l.get(l, 0) + 1
+        for l, n in n_per_l.items():
+            max_n_per_l[l] = max(max_n_per_l.get(l, 0), n)
+    return max_n_per_l
+```
+
+**def2-svp基底での例**:
+- `max_n_per_l = {0: 6, 1: 3, 2: 1, 3: 0}`
+- s軌道: 最大6個、p軌道: 最大3個、d軌道: 最大1個、f軌道: なし
+
+#### 化学的意味
+
+##### 軌道の局在化
+- **正準軌道**: 分子全体に広がった軌道
+- **局在化軌道**: 特定の原子や結合に局在した軌道
+
+##### パディングの意味
+- **物理的意味**: 存在しない軌道はゼロで埋める
+- **計算効率**: 全ての分子で同じ次元のテンソルを維持
+- **機械学習**: バッチ処理が可能
+
+#### 数値例
+
+##### メタン分子（CH4）の場合
+```python
+# 入力
+mo_coeff.shape = (23, 8)  # 23個の基底関数、8個の分子軌道
+atom_type_embedding_per_atom = {0: 5, 1: 0, 2: 0, 3: 0, 4: 0}  # C, H, H, H, H
+
+# 処理後
+mo_embeddings_padded.shape = (8, 5, 15)  # 8個の軌道、5個の原子、15次元特徴
+```
+
+### 8. 化学的意味
 
 #### 正準軌道 vs 局在化軌道
 - **正準軌道**: エネルギー順に並んだ軌道、分子全体に広がる
