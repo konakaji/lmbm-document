@@ -1,0 +1,237 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{color}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\geometry{margin=1in}
+
+\title{Transformation from Molecular Orbital Coefficients to Embedding Vectors: Detailed Mathematical Analysis}
+\author{EGSMole Project}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Overview}
+
+This document provides a detailed mathematical explanation of the transformation process from molecular orbital coefficients (MO coefficients) computed by PySCF to embedding vectors (MO embeddings) that can be used in E3NN (Equivariant Neural Networks).
+
+\section{Overall Transformation Framework}
+
+The transformation from molecular orbital coefficients $\mathbf{C} \in \mathbb{R}^{N_{\text{basis}} \times N_{\text{mo}}}$ to embedding vectors $\mathbf{E} \in \mathbb{R}^{N_{\text{mo}} \times N_{\text{atom}} \times N_{\text{features}}}$ is expressed by the following equation:
+
+\begin{equation}
+\mathbf{E} = \text{EmbedMOsOnAtoms}(\mathbf{C}, \mathbf{E}_{\text{energy}}, \mathbf{P}_{\text{atom}}, \mathbf{S}_{\text{irrep}})
+\end{equation}
+
+where:
+\begin{itemize}
+\item $\mathbf{C}$: Molecular orbital coefficient matrix $(N_{\text{basis}} \times N_{\text{mo}})$
+\item $\mathbf{E}_{\text{energy}}$: Molecular orbital energies $(N_{\text{mo}})$
+\item $\mathbf{P}_{\text{atom}}$: Atom type embedding information
+\item $\mathbf{S}_{\text{irrep}}$: Irreducible representation strings for each atom
+\end{itemize}
+
+\section{Step-by-Step Transformation Process}
+
+\subsection{Step 1: d-orbital Correction}
+
+Correct the difference in d-orbital ordering between PySCF and E3NN:
+
+\begin{equation}
+\mathbf{C}_{\text{fixed}} = \mathbf{F}_D^T \mathbf{C}
+\end{equation}
+
+where $\mathbf{F}_D$ is the d-orbital correction matrix.
+
+\subsection{Step 2: Transposition}
+
+Transpose the molecular orbital coefficients to enable independent processing of each molecular orbital:
+
+\begin{equation}
+\mathbf{C}_{\text{transposed}} = \mathbf{C}_{\text{fixed}}^T \in \mathbb{R}^{N_{\text{mo}} \times N_{\text{basis}}}
+\end{equation}
+
+\subsection{Step 3: Atom-wise Orbital Coefficient Extraction}
+
+For each atom $a$, extract the coefficients corresponding to its basis functions:
+
+\begin{equation}
+\mathbf{C}_a = \mathbf{C}_{\text{transposed}}[:, \text{slice}_a]
+\end{equation}
+
+where $\text{slice}_a$ is the index range of basis functions corresponding to atom $a$.
+
+\subsection{Step 4: Padding Process}
+
+Pad each atom's orbital coefficients to a unified dimension. Let $\mathbf{S}_a$ be the irreducible representation of atom $a$ and $\mathbf{n}_{\text{target}}$ be the target number of orbitals:
+
+\begin{align}
+\mathbf{n}_{\text{count}} &= \text{CountIrreps}(\mathbf{S}_a) \\
+\mathbf{n}_{\text{diff}} &= \mathbf{n}_{\text{target}} - \mathbf{n}_{\text{count}} \\
+\mathbf{S}_{\text{padded}} &= \mathbf{S}_a + \text{GenerateDiffIrreps}(\mathbf{n}_{\text{diff}})
+\end{align}
+
+The padded orbital coefficients are:
+
+\begin{equation}
+\mathbf{C}_{a,\text{padded}} = \text{Pad}(\mathbf{C}_a, \mathbf{n}_{\text{diff}})
+\end{equation}
+
+\subsection{Step 5: Energy Information Addition}
+
+When molecular orbital energies are provided, add energy information to each atom's embedding vector:
+
+\begin{equation}
+\mathbf{E}_{a,\text{with\_energy}} = \text{Concat}(\mathbf{E}_{\text{energy}}, \mathbf{C}_{a,\text{padded}})
+\end{equation}
+
+where $\mathbf{E}_{\text{energy}}$ represents the energy values of each molecular orbital.
+
+\subsection{Step 6: Atom Type Information Addition}
+
+Add one-hot encoding of atom type to each atom's embedding vector:
+
+\begin{equation}
+\mathbf{A}_{a,\text{one\_hot}} = \text{OneHot}(\text{AtomType}(a), N_{\text{max\_atoms}})
+\end{equation}
+
+The final embedding vector is:
+
+\begin{equation}
+\mathbf{E}_{a,\text{final}} = \text{Concat}(\mathbf{A}_{a,\text{one\_hot}}, \mathbf{E}_{a,\text{with\_energy}})
+\end{equation}
+
+\section{Dimension Calculation}
+
+\subsection{Orbital Contribution Dimension}
+
+The orbital contribution dimension for each atom is determined by the dimension of the irreducible representation after padding:
+
+\begin{equation}
+d_{\text{orbital}} = \sum_{l=0}^{l_{\max}} n_l \cdot (2l + 1)
+\end{equation}
+
+where:
+\begin{itemize}
+\item $n_l$: Number of orbitals with angular momentum $l$
+\item $2l + 1$: Degeneracy of orbitals with angular momentum $l$
+\end{itemize}
+
+\subsection{Energy Dimension}
+
+When molecular orbital energies are provided:
+
+\begin{equation}
+d_{\text{energy}} = N_{\text{mo}}
+\end{equation}
+
+\subsection{Atom Type Dimension}
+
+One-hot encoding of atom types:
+
+\begin{equation}
+d_{\text{atom\_type}} = N_{\text{max\_atoms}}
+\end{equation}
+
+\subsection{Total Dimension}
+
+The dimension of the final embedding vector is:
+
+\begin{equation}
+N_{\text{features}} = d_{\text{atom\_type}} + d_{\text{orbital}} + d_{\text{energy}}
+\end{equation}
+
+\section{Concrete Example: Methane Molecule (CH$_4$)}
+
+\subsection{Input Data}
+
+\begin{itemize}
+\item Molecular orbital coefficients: $\mathbf{C} \in \mathbb{R}^{34 \times 34}$
+\item Molecular orbital energies: $\mathbf{E}_{\text{energy}} \in \mathbb{R}^{34}$
+\item Basis set: def2-svp
+\end{itemize}
+
+\subsection{Irreducible Representations for Each Atom}
+
+\begin{align}
+\text{Carbon atom}: \quad \mathbf{S}_0 &= \text{1x0e+1x0e+1x0e+1x1o+1x1o+1x2e} \\
+\text{Hydrogen atoms}: \quad \mathbf{S}_i &= \text{1x0e+1x0e+1x1o} \quad (i = 1,2,3,4)
+\end{align}
+
+\subsection{Padding Process}
+
+Target number of orbitals: $\mathbf{n}_{\text{target}} = [3, 2, 1]$ (s, p, d orbitals)
+
+\begin{align}
+\text{Carbon atom}: \quad \mathbf{n}_{\text{count}} &= [3, 2, 1], \quad \mathbf{n}_{\text{diff}} = [0, 0, 0] \\
+\text{Hydrogen atoms}: \quad \mathbf{n}_{\text{count}} &= [2, 1, 0], \quad \mathbf{n}_{\text{diff}} = [1, 1, 1]
+\end{align}
+
+\subsection{Dimension Calculation}
+
+\begin{align}
+d_{\text{orbital}} &= 3 \times 1 + 2 \times 3 + 1 \times 5 = 14 \\
+d_{\text{energy}} &= 34 \\
+d_{\text{atom\_type}} &= 0 \quad \text{(when energies are included)} \\
+N_{\text{features}} &= 0 + 14 + 34 = 48
+\end{align}
+
+\subsection{Final Output}
+
+\begin{equation}
+\mathbf{E} \in \mathbb{R}^{34 \times 5 \times 48}
+\end{equation}
+
+\section{Mathematical Properties}
+
+\subsection{Rotation Invariance}
+
+The embedding vectors possess rotation-invariant properties with respect to molecular rotations:
+
+\begin{equation}
+\mathbf{E}(R\mathbf{M}) = \mathbf{E}(\mathbf{M})
+\end{equation}
+
+where $R$ is a rotation matrix and $\mathbf{M}$ is the molecular geometry.
+
+\subsection{Permutation Invariance}
+
+Invariant with respect to permutation of identical atoms:
+
+\begin{equation}
+\mathbf{E}(\sigma(\mathbf{M})) = \sigma(\mathbf{E}(\mathbf{M}))
+\end{equation}
+
+where $\sigma$ represents permutation of identical atoms.
+
+\section{Implementation Considerations}
+
+\subsection{Memory Efficiency}
+
+For large molecules, the embedding vector size becomes significant, making memory-efficient implementation crucial.
+
+\subsection{Numerical Stability}
+
+In the padding process, it is necessary to ensure that zero-padding is numerically stable.
+
+\subsection{Parallel Processing}
+
+Since each atom's processing is independent, parallelization is possible.
+
+\section{Conclusion}
+
+The transformation from molecular orbital coefficients to embedding vectors is a crucial process that converts quantum chemistry calculation results into a format suitable for machine learning. This transformation enables efficient processing of molecular electronic structure information in E3NN.
+
+Each stage of the transformation process is mathematically well-defined, properly converting molecular orbital information into embedding vectors while preserving rotation invariance and permutation invariance.
+
+\end{document}
