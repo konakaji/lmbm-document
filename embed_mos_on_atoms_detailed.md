@@ -23,8 +23,8 @@ def embed_mos_on_atoms(
 
 | パラメータ | 型 | 説明 |
 |-----------|-----|------|
-| `mo_coeff` | `torch.Tensor` | 分子軌道係数テンソル。形状: `(n_basis, n_mo)` |
-| `max_n_per_l` | `Dict[int, int]` | 各軌道角運動量lに対する最大軌道数の辞書 |
+| `mo_coeff` | `torch.Tensor` | 分子軌道係数テンソル。形状: `(n_basis, n_mo)`（PySCF由来） |
+| `max_n_per_l` | `Dict[int, int]` | 各軌道角運動量lに対する最大軌道数の辞書（主量子数の最大値に対応） |
 | `irrep_string_per_atom` | `List[str]` | 各原子のE3NN既約表現文字列のリスト |
 | `atom_type_embedding_per_atom` | `torch.Tensor` | 各原子の原子種埋め込みベクトル |
 | `mo_energies` | `Optional[torch.Tensor]` | 分子軌道エネルギー（オプション） |
@@ -86,11 +86,13 @@ mol.atom = mol_string
 mol.basis = "def2-svp"
 mol.build()
 
+# Hartree-Fock計算を実行
 mf = scf.RHF(mol)
-mf.kernel()
+mf.kernel()  # ここで分子軌道係数が計算される
 
-# 分子軌道係数を取得
+# 分子軌道係数を取得（PySCFのmf.mo_coeffから）
 mo_coeff = torch.tensor(mf.mo_coeff, dtype=torch.float32)
+# 形状: (n_basis, n_mo) = (34, 34) for CH4
 
 # 必要なパラメータを準備
 max_n_per_l = hf_utils.get_max_n_per_l_for_basis("def2-svp")
@@ -121,24 +123,41 @@ print(f"MO embeddings with atom type shape: {mo_embeddings_padded_with_atom_idx.
 #### 1. 分子軌道係数 (mo_coeff)
 ```python
 # メタン分子（CH4）の例
-# 形状: (n_basis, n_mo) = (30, 10)
+# 形状: (n_basis, n_mo) = (34, 34)
+# PySCFのmf.mo_coeffから取得
 mo_coeff = torch.tensor([
-    [0.8, 0.2, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # C 1s
-    [0.3, 0.7, 0.2, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # C 2s
-    [0.1, 0.2, 0.6, 0.3, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0],  # C 2px
-    # ... 他の基底関数
+    [0.992, -0.257, 0.000, 0.000, 0.000, ...],  # C 1s基底関数
+    [0.029, 0.551, 0.000, 0.000, 0.000, ...],   # C 2s基底関数
+    [-0.015, 0.363, 0.000, 0.000, 0.000, ...],  # C 3s基底関数
+    [0.000, 0.000, 0.295, 0.010, 0.211, ...],   # C 2px基底関数
+    [0.000, 0.000, -0.211, -0.004, 0.295, ...], # C 2py基底関数
+    # ... 他の基底関数（合計34個）
 ], dtype=torch.float32)
 ```
+
+**mo_coeffの物理的意味**:
+- **PySCF由来**: Hartree-Fock計算（`mf.kernel()`）で得られる分子軌道係数
+- **形状**: `(n_basis, n_mo)` = `(基底関数数, 分子軌道数)`
+- **内容**: `mo_coeff[i, j]` = 基底関数iが分子軌道jに寄与する係数
+- **各行**: 1つの基底関数が各分子軌道にどの程度寄与するか
+- **各列**: 1つの分子軌道が各基底関数からどの程度構成されるか
+- **例**: メタン分子では34個の基底関数から34個の分子軌道が構成される
 
 #### 2. max_n_per_l パラメータ
 ```python
 # def2-svp基底関数セットの場合
 max_n_per_l = {
-    0: 4,  # s軌道: 最大4個
-    1: 3,  # p軌道: 最大3個
-    2: 1   # d軌道: 最大1個
+    0: 4,  # s軌道: 最大4個 (主量子数 n=1,2,3,4)
+    1: 3,  # p軌道: 最大3個 (主量子数 n=2,3,4)
+    2: 1   # d軌道: 最大1個 (主量子数 n=3)
 }
 ```
+
+**max_n_per_lの物理的意味**:
+- 各軌道角運動量lに対して、**考慮する元素の中で最大の主量子数**を表す
+- s軌道が4個なのは、第3周期元素（Na-Ar）が4個のs軌道（1s, 2s, 3s, 4s）を持つため
+- 軽い元素（H, C, Oなど）は3個のs軌道しか使わないが、パディングによって4個目はゼロで埋められる
+- これにより、異なる元素を含む分子でも統一された次元でバッチ処理が可能
 
 #### 3. irrep_string_per_atom
 ```python
@@ -240,6 +259,7 @@ mo_embeddings_padded_with_atom_idx = torch.tensor([
 ### 1. パディング処理
 - 異なる原子間で軌道数の違いを統一するため、ゼロパディングを適用
 - バッチ処理での効率的な計算を可能にする
+- **主量子数の違いによるパディング**: 軽い元素は少ない主量子数しか使わないが、重い元素の最大主量子数に合わせてパディング
 
 ### 2. E3NN互換性
 - 出力はE3NNの既約表現形式に準拠
@@ -302,10 +322,17 @@ mo_embeddings_padded_with_atom_idx = torch.tensor([
 
 ## 関連関数
 
+- `calculate_hf_mos`: PySCFでHartree-Fock計算を実行し、mo_coeffを取得
+  - `mf.kernel()`で分子軌道係数を計算
+  - `mf.mo_coeff`から分子軌道係数を取得（形状: (n_basis, n_mo)）
 - `get_max_n_per_l_for_basis`: 基底関数セットからmax_n_per_lを自動決定
+  - 全元素をスキャンして各軌道角運動量lに対する最大の主量子数を決定
+  - 例：def2-svpではs軌道4個（Na-Ar元素が4個のs軌道を持つため）
 - `mos_to_irrep_strings`: 分子からirrep文字列を生成
 - `fix_d_orbitals`: PySCFとE3NNのd軌道順序の違いを修正
 
 ## まとめ
 
 `embed_mos_on_atoms`関数は、量子化学計算と機械学習を橋渡しする重要な関数です。分子軌道データをE3NNで処理可能な形式に変換し、回転不変性と等変性を保持しながら、原子種情報とエネルギー情報を統合した構造化された表現を提供します。
+
+**max_n_per_lの本質**は、考慮する元素の中で最大の主量子数を表しており、これにより異なる元素を含む分子でも統一された次元でバッチ処理が可能になります。例えば、def2-svp基底関数セットでは、第3周期元素（Na-Ar）が4個のs軌道（1s, 2s, 3s, 4s）を持つため、s軌道の最大数は4個となり、軽い元素はパディングによって統一された次元で処理されます。
